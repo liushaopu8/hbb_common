@@ -1144,22 +1144,19 @@ impl Config {
     /// never sees a UUID_MISMATCH after reinstall.
     pub fn set_key_pair_from_seed(seed: &[u8]) {
         use sha2::{Digest, Sha256};
-        // Hash the seed to 32 bytes for ed25519 secret key seed
+        // Hash the seed to 32 bytes for ed25519 seed. Do NOT manually clamp:
+        // sodiumoxide's keypair_from_seed handles ed25519 clamping internally.
         let hash = {
             let mut h = Sha256::new();
             h.update(seed);
             let r = h.finalize();
             let mut arr = [0u8; 32];
             arr.copy_from_slice(&r);
-            // Clamp for ed25519 (clear low 3 bits, set high bit of second byte, set high bit)
-            arr[0] &= 248;
-            arr[31] &= 63;
-            arr[31] |= 64;
             arr
         };
-        let sk = sign::SecretKey::from_slice(&hash)
-            .expect("32-byte seed must produce valid ed25519 secret key");
-        let pk = sk.public_key();
+        let seed = sign::Seed::from_slice(&hash)
+            .expect("SHA-256 output must be a valid 32-byte ed25519 seed");
+        let (pk, sk) = sign::keypair_from_seed(&seed);
         let key_pair = (sk.0.to_vec(), pk.0.to_vec());
         // Update CONFIG directly
         let mut config = CONFIG.write().unwrap();
