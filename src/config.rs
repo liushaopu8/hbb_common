@@ -1139,6 +1139,38 @@ impl Config {
         config.key_pair
     }
 
+    /// SunDesk: derive a deterministic ed25519 keypair from a seed (e.g. hardware SN).
+    /// Same seed → same keypair every time, surviving reinstalls, so the server
+    /// never sees a UUID_MISMATCH after reinstall.
+    pub fn set_key_pair_from_seed(seed: &[u8]) {
+        use sha2::{Digest, Sha256};
+        // Hash the seed to 32 bytes for ed25519 secret key seed
+        let hash = {
+            let mut h = Sha256::new();
+            h.update(seed);
+            let r = h.finalize();
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&r);
+            // Clamp for ed25519 (clear low 3 bits, set high bit of second byte, set high bit)
+            arr[0] &= 248;
+            arr[31] &= 63;
+            arr[31] |= 64;
+            arr
+        };
+        let sk = sign::SecretKey::from_slice(&hash)
+            .expect("32-byte seed must produce valid ed25519 secret key");
+        let pk = sk.public_key();
+        let key_pair = (sk.0.to_vec(), pk.0.to_vec());
+        // Update CONFIG directly
+        let mut config = CONFIG.write().unwrap();
+        config.key_pair = key_pair.clone();
+        config.key_confirmed = false;
+        config.store();
+        drop(config);
+        // Update the cached KEY_PAIR
+        *KEY_PAIR.lock().unwrap() = Some(key_pair);
+    }
+
     pub fn get_cached_pk() -> Option<Vec<u8>> {
         KEY_PAIR.lock().unwrap().clone().map(|k| k.1)
     }
