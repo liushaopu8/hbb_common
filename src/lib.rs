@@ -375,6 +375,25 @@ pub fn get_uuid() -> Vec<u8> {
     Config::get_key_pair().1
 }
 
+#[cfg(target_os = "android")]
+pub fn get_uuid() -> Vec<u8> {
+    use std::sync::OnceLock;
+    static CACHED_ANDROID_UUID: OnceLock<Vec<u8>> = OnceLock::new();
+    if let Some(uuid) = CACHED_ANDROID_UUID.get() {
+        return uuid.clone();
+    }
+    let mut config = CONFIG.write().unwrap();
+    if config.uuid.is_empty() {
+        config.uuid = rand::thread_rng().gen::<[u8; 16]>().to_vec();
+        config.store();
+        log::info!("[sundesk-uuid] generated new persistent uuid: {:02x?}", config.uuid);
+    }
+    let uuid = config.uuid.clone();
+    drop(config);
+    let _ = CACHED_ANDROID_UUID.set(uuid.clone());
+    uuid
+}
+
 #[inline]
 pub fn get_time() -> i64 {
     std::time::SystemTime::now()

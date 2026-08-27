@@ -226,6 +226,8 @@ pub struct Config {
     key_confirmed: bool,
     #[serde(default, deserialize_with = "deserialize_hashmap_string_bool")]
     keys_confirmed: HashMap<String, bool>,
+    #[serde(default, deserialize_with = "deserialize_vec_u8")]
+    pub uuid: Vec<u8>, // persistent device uuid for rendezvous (separate from pk)
 }
 
 #[derive(Debug, Default, PartialEq, Serialize, Deserialize, Clone)]
