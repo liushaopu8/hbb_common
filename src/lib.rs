@@ -372,26 +372,18 @@ pub fn get_uuid() -> Vec<u8> {
             }
         }
     }
-    Config::get_key_pair().1
-}
-
-#[cfg(target_os = "android")]
-pub fn get_uuid() -> Vec<u8> {
-    use std::sync::OnceLock;
-    static CACHED_ANDROID_UUID: OnceLock<Vec<u8>> = OnceLock::new();
-    if let Some(uuid) = CACHED_ANDROID_UUID.get() {
-        return uuid.clone();
+    // Android/iOS have no machine_uid; use a persistent device uuid that is
+    // independent of the keypair (see Config::get_persistent_uuid /
+    // Config::set_uuid_from_seed). Desktop only reaches here if machine_uid
+    // failed, in which case we keep the legacy pk fallback.
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        Config::get_persistent_uuid()
     }
-    let mut config = CONFIG.write().unwrap();
-    if config.uuid.is_empty() {
-        config.uuid = rand::thread_rng().gen::<[u8; 16]>().to_vec();
-        config.store();
-        log::info!("[sundesk-uuid] generated new persistent uuid: {:02x?}", config.uuid);
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        Config::get_key_pair().1
     }
-    let uuid = config.uuid.clone();
-    drop(config);
-    let _ = CACHED_ANDROID_UUID.set(uuid.clone());
-    uuid
 }
 
 #[inline]

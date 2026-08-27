@@ -71,6 +71,7 @@ lazy_static::lazy_static! {
     pub static ref EXE_RENDEZVOUS_SERVER: RwLock<String> = Default::default();
     pub static ref APP_NAME: RwLock<String> = RwLock::new("SunDesk".to_owned());
     static ref KEY_PAIR: Mutex<Option<KeyPair>> = Default::default();
+    static ref UUID_CACHE: RwLock<Option<Vec<u8>>> = Default::default();
     static ref USER_DEFAULT_CONFIG: RwLock<(UserDefaultConfig, Instant)> = RwLock::new((UserDefaultConfig::load(), Instant::now()));
     pub static ref NEW_STORED_PEER_CONFIG: Mutex<HashSet<String>> = Default::default();
     pub static ref DEFAULT_SETTINGS: RwLock<HashMap<String, String>> = Default::default();
@@ -1207,6 +1208,56 @@ impl Config {
         } else {
             None
         }
+    }
+
+    /// SunDesk: persistent device uuid for rendezvous, independent of pk.
+    /// Stable across reinstalls when seeded from the hardware SN via
+    /// `set_uuid_from_seed`. Falls back to a random 16-byte value if
+    /// seeding has not happened yet.
+    pub fn get_persistent_uuid() -> Vec<u8> {
+        if let Some(uuid) = UUID_CACHE.read().unwrap().as_ref() {
+            return uuid.clone();
+        }
+        let mut config = CONFIG.write().unwrap();
+        if config.uuid.is_empty() {
+            config.uuid = rand::thread_rng().gen::<[u8; 16]>().to_vec();
+            config.store();
+            log::info!(
+                "[sundesk-uuid] no SN seed yet, generated random uuid: {:02x?}",
+                config.uuid
+            );
+        }
+        let uuid = config.uuid.clone();
+        drop(config);
+        *UUID_CACHE.write().unwrap() = Some(uuid.clone());
+        uuid
+    }
+
+    /// SunDesk: derive the device uuid deterministically from the hardware SN
+    /// (sha256 of SN, first 16 bytes). Survives reinstalls / data wipes, just
+    /// like the SN-seeded keypair.
+    pub fn set_uuid_from_seed(seed_bytes: &[u8]) {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(seed_bytes);
+        let digest = h.finalize();
+        let uuid = digest[..16].to_vec();
+        {
+            let mut config = CONFIG.write().unwrap();
+            if config.uuid != uuid {
+                log::info!(
+                    "[sundesk-uuid] uuid from SN seed: {:02x?} (was {:02x?})",
+                    uuid,
+                    config.uuid
+                );
+                config.uuid = uuid.clone();
+                config.key_confirmed = false;
+                config.store();
+            } else {
+                log::info!("[sundesk-uuid] uuid already matches SN seed: {:02x?}", uuid);
+            }
+        }
+        *UUID_CACHE.write().unwrap() = Some(uuid);
     }
 
     pub fn no_register_device() -> bool {
