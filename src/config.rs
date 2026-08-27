@@ -1172,6 +1172,20 @@ impl Config {
         KEY_PAIR.lock().unwrap().clone().map(|k| k.1)
     }
 
+    /// SunDesk: generate a fresh random keypair (used when UUID_MISMATCH for SN-based ID).
+    /// This is like get_key_pair() but forces a new random keypair regardless of existing one.
+    pub fn update_key_pair() {
+        let (pk, sk) = sign::gen_keypair();
+        let key_pair = (sk.0.to_vec(), pk.0.to_vec());
+        let mut config = CONFIG.write().unwrap();
+        config.key_pair = key_pair.clone();
+        config.key_confirmed = false;
+        config.store();
+        drop(config);
+        *KEY_PAIR.lock().unwrap() = Some(key_pair);
+        log::info!("[sundesk-seed] update_key_pair: generated fresh random keypair");
+    }
+
     /// Get existing key pair without generating a new one.
     /// Returns None if no key pair exists in cache or config file.
     pub fn get_existing_key_pair() -> Option<KeyPair> {
