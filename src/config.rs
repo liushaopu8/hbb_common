@@ -1216,6 +1216,7 @@ impl Config {
     /// seeding has not happened yet.
     pub fn get_persistent_uuid() -> Vec<u8> {
         if let Some(uuid) = UUID_CACHE.read().unwrap().as_ref() {
+            log::info!("[UUIDPK] get_persistent_uuid cache hit: len={}", uuid.len());
             return uuid.clone();
         }
         let mut config = CONFIG.write().unwrap();
@@ -1223,13 +1224,15 @@ impl Config {
             config.uuid = rand::thread_rng().gen::<[u8; 16]>().to_vec();
             config.store();
             log::info!(
-                "[sundesk-uuid] no SN seed yet, generated random uuid: {:02x?}",
-                config.uuid
+                "[UUIDPK] no SN seed yet, generated random uuid: len={} prefix={:02x?}",
+                config.uuid.len(),
+                &config.uuid[..config.uuid.len().min(4)]
             );
         }
         let uuid = config.uuid.clone();
         drop(config);
         *UUID_CACHE.write().unwrap() = Some(uuid.clone());
+        log::info!("[UUIDPK] get_persistent_uuid loaded: len={}", uuid.len());
         uuid
     }
 
@@ -1237,6 +1240,7 @@ impl Config {
     /// (sha256 of SN, first 16 bytes). Survives reinstalls / data wipes, just
     /// like the SN-seeded keypair.
     pub fn set_uuid_from_seed(seed_bytes: &[u8]) {
+        log::info!("[UUIDPK] set_uuid_from_seed begin: seed_len={}", seed_bytes.len());
         use sha2::{Digest, Sha256};
         let mut h = Sha256::new();
         h.update(seed_bytes);
@@ -1246,18 +1250,20 @@ impl Config {
             let mut config = CONFIG.write().unwrap();
             if config.uuid != uuid {
                 log::info!(
-                    "[sundesk-uuid] uuid from SN seed: {:02x?} (was {:02x?})",
-                    uuid,
-                    config.uuid
+                    "[UUIDPK] uuid from SN seed: new_len={} new_prefix={:02x?} old_len={}",
+                    uuid.len(),
+                    &uuid[..uuid.len().min(4)],
+                    config.uuid.len()
                 );
                 config.uuid = uuid.clone();
                 config.key_confirmed = false;
                 config.store();
             } else {
-                log::info!("[sundesk-uuid] uuid already matches SN seed: {:02x?}", uuid);
+                log::info!("[UUIDPK] uuid already matches SN seed: len={} prefix={:02x?}", uuid.len(), &uuid[..uuid.len().min(4)]);
             }
         }
         *UUID_CACHE.write().unwrap() = Some(uuid);
+        log::info!("[UUIDPK] set_uuid_from_seed end");
     }
 
     pub fn no_register_device() -> bool {

@@ -378,7 +378,9 @@ pub fn get_uuid() -> Vec<u8> {
     // failed, in which case we keep the legacy pk fallback.
     #[cfg(any(target_os = "android", target_os = "ios"))]
     {
-        Config::get_persistent_uuid()
+        let uuid = Config::get_persistent_uuid();
+        log::info!("[UUIDPK] get_uuid mobile: uuid_len={} uuid_prefix={:02x?}", uuid.len(), &uuid[..uuid.len().min(4)]);
+        uuid
     }
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
