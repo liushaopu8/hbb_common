@@ -1162,11 +1162,15 @@ impl Config {
         let (pk, sk) = sign::keypair_from_seed(&seed);
         let key_pair = (sk.0.to_vec(), pk.0.to_vec());
         // Update CONFIG directly
-        let mut config = CONFIG.write().unwrap();
-        config.key_pair = key_pair.clone();
-        config.key_confirmed = false;
+        {
+            let mut config = CONFIG.write().unwrap();
+            config.key_pair = key_pair.clone();
+            config.key_confirmed = false;
+        }
+        // store() may call get_uuid() while encrypting config values. Do not
+        // call it while CONFIG is write-locked, or the lock is re-entered.
+        let config = CONFIG.read().unwrap().clone();
         config.store();
-        drop(config);
         // Update the cached KEY_PAIR
         *KEY_PAIR.lock().unwrap() = Some(key_pair);
     }
@@ -1219,18 +1223,24 @@ impl Config {
             log::info!("[UUIDPK] get_persistent_uuid cache hit: len={}", uuid.len());
             return uuid.clone();
         }
-        let mut config = CONFIG.write().unwrap();
-        if config.uuid.is_empty() {
-            config.uuid = rand::thread_rng().gen::<[u8; 16]>().to_vec();
+        let mut generated = false;
+        let uuid = {
+            let mut config = CONFIG.write().unwrap();
+            if config.uuid.is_empty() {
+                config.uuid = rand::thread_rng().gen::<[u8; 16]>().to_vec();
+                generated = true;
+            }
+            config.uuid.clone()
+        };
+        if generated {
+            let config = CONFIG.read().unwrap().clone();
             config.store();
             log::info!(
                 "[UUIDPK] no SN seed yet, generated random uuid: len={} prefix={:02x?}",
-                config.uuid.len(),
-                &config.uuid[..config.uuid.len().min(4)]
+                uuid.len(),
+                &uuid[..uuid.len().min(4)]
             );
         }
-        let uuid = config.uuid.clone();
-        drop(config);
         *UUID_CACHE.write().unwrap() = Some(uuid.clone());
         log::info!("[UUIDPK] get_persistent_uuid loaded: len={}", uuid.len());
         uuid
@@ -1246,6 +1256,7 @@ impl Config {
         h.update(seed_bytes);
         let digest = h.finalize();
         let uuid = digest[..16].to_vec();
+        let mut changed = false;
         {
             let mut config = CONFIG.write().unwrap();
             if config.uuid != uuid {
@@ -1257,10 +1268,14 @@ impl Config {
                 );
                 config.uuid = uuid.clone();
                 config.key_confirmed = false;
-                config.store();
+                changed = true;
             } else {
                 log::info!("[UUIDPK] uuid already matches SN seed: len={} prefix={:02x?}", uuid.len(), &uuid[..uuid.len().min(4)]);
             }
+        }
+        if changed {
+            let config = CONFIG.read().unwrap().clone();
+            config.store();
         }
         *UUID_CACHE.write().unwrap() = Some(uuid);
         log::info!("[UUIDPK] set_uuid_from_seed end");
