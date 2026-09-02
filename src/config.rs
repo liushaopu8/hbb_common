@@ -1129,6 +1129,14 @@ impl Config {
             let (pk, sk) = sign::gen_keypair();
             let key_pair = (sk.0.to_vec(), pk.0.into());
             config.key_pair = key_pair.clone();
+            // [sundesk-pwdiag] A RANDOM keypair is being created (first run, before SN
+            // seeding). Permanent-password storage encrypted with this pk becomes
+            // undecryptable once set_key_pair_from_seed() replaces the keypair.
+            log::warn!(
+                "[sundesk-pwdiag] config.rs:get_key_pair generated RANDOM keypair: id='{}' pk_fp={} — password storage encrypted before SN seeding will break after keypair replacement",
+                config.id,
+                Self::diag_fp(&config.key_pair.1)
+            );
             std::thread::spawn(|| {
                 let mut config = CONFIG.write().unwrap();
                 config.key_pair = key_pair;
@@ -1165,11 +1173,36 @@ impl Config {
         config.store();
         drop(config);
         // Update the cached KEY_PAIR
-        *KEY_PAIR.lock().unwrap() = Some(key_pair);
+        *KEY_PAIR.lock().unwrap() = Some(key_pair.clone());
+        // [sundesk-pwdiag] After replacing the keypair with the SN-derived one, check
+        // whether the existing permanent-password storage can still be decrypted.
+        let (pw_storage, pw_salt) = Self::get_local_permanent_password_storage_and_salt();
+        let storage_usable = !pw_storage.is_empty()
+            && local_permanent_password_storage_is_usable_for_auth(&pw_storage, &pw_salt);
+        log::warn!(
+            "[sundesk-pwdiag] config.rs:set_key_pair_from_seed DONE: new_pk_fp={} local_pw_storage_present={} storage_usable_under_new_pk={} salt_len={}",
+            Self::diag_fp(&key_pair.1),
+            !pw_storage.is_empty(),
+            storage_usable,
+            pw_salt.len()
+        );
     }
 
     pub fn get_cached_pk() -> Option<Vec<u8>> {
         KEY_PAIR.lock().unwrap().clone().map(|k| k.1)
+    }
+
+    /// SunDesk diagnostics: short SHA-256 fingerprint of a key/bytes.
+    /// Never logs the raw key material — only a truncated hash, so it is safe
+    /// to correlate across the toggle / SN-seeding / auth code paths.
+    pub fn diag_fp(data: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        let h = Sha256::digest(data);
+        h.iter()
+            .take(4)
+            .map(|b| format!("{:02x}", b))
+            .collect::<Vec<_>>()
+            .join("")
     }
 
     /// SunDesk: generate a fresh random keypair (used when UUID_MISMATCH for SN-based ID).
@@ -1357,11 +1390,32 @@ impl Config {
             return false;
         };
         if stored == config.password {
+            log::info!(
+                "[sundesk-pwdiag] config.rs:set_permanent_password: storage unchanged (already matches), pwd_len={} pk_fp={} salt_fp={}",
+                password.len(),
+                Self::diag_fp(&crate::get_uuid()),
+                Self::diag_fp(config.salt.as_bytes())
+            );
             return true;
         }
+        let pk_fp = Self::diag_fp(&crate::get_uuid());
+        let salt_fp = Self::diag_fp(config.salt.as_bytes());
+        let salt_len = config.salt.len();
         config.password = stored;
         config.store();
         Self::clear_trusted_devices();
+        // [sundesk-pwdiag] Correlate this pk_fp/salt_fp with the SN-seeding log above,
+        // the effective_salt log, and the validate_password log on first connection.
+        // If pk_fp differs, the storage was encrypted with a keypair that was later
+        // replaced. If salt_fp differs, the client hashed with a different salt than
+        // the one used to store the password.
+        log::info!(
+            "[sundesk-pwdiag] config.rs:set_permanent_password STORED: pwd_len={} salt_len={} salt_fp={} pk_fp={}",
+            password.len(),
+            salt_len,
+            salt_fp,
+            pk_fp
+        );
         true
     }
 
@@ -1466,18 +1520,47 @@ impl Config {
         let (local_storage, local_salt) = Self::get_local_permanent_password_storage_and_salt();
         if !local_storage.is_empty() {
             if local_permanent_password_storage_is_usable_for_auth(&local_storage, &local_salt) {
-                return Self::get_salt();
+                // SunDesk fix: always send the SAME salt that was used to compute the stored h1.
+                // Previously this called Self::get_salt(), which can regenerate the salt if the
+                // in-memory config is reloaded/replaced, causing the client to hash with a salt
+                // that does not match the stored password.
+                log::warn!(
+                    "[sundesk-pwdiag] config.rs:get_effective_permanent_password_salt: local_usable=true stored_salt_len={} stored_salt_fp={} effective_salt_fp=SAME_AS_STORED pk_fp={}",
+                    local_salt.len(),
+                    Self::diag_fp(local_salt.as_bytes()),
+                    Self::diag_fp(&crate::get_uuid())
+                );
+                return local_salt;
             }
+            // [sundesk-pwdiag] Storage exists but cannot be decrypted with the current
+            // keypair (likely encrypted before SN seeding). Returning an empty salt makes
+            // client-side hashing impossible, so every login fails until password is reset.
+            log::error!(
+                "[sundesk-pwdiag] config.rs:get_effective_permanent_password_salt: local storage present but NOT decryptable (pk_fp={}), returning EMPTY salt — unattended auth is broken until password is re-set",
+                Self::diag_fp(&crate::get_uuid())
+            );
             return String::new();
         }
         let (preset_storage, preset_salt) = Self::get_preset_password_storage_and_salt();
         if !preset_salt.is_empty() {
             if preset_permanent_password_storage_is_usable_for_auth(&preset_storage, &preset_salt) {
+                log::warn!(
+                    "[sundesk-pwdiag] config.rs:get_effective_permanent_password_salt: using preset_salt_fp={}",
+                    Self::diag_fp(preset_salt.as_bytes())
+                );
                 return preset_salt;
             }
+            log::warn!(
+                "[sundesk-pwdiag] config.rs:get_effective_permanent_password_salt: preset salt present but storage unusable, returning empty"
+            );
             return String::new();
         }
-        Self::get_salt()
+        let salt = Self::get_salt();
+        log::warn!(
+            "[sundesk-pwdiag] config.rs:get_effective_permanent_password_salt: no local/preset storage, fallback get_salt fp={}",
+            Self::diag_fp(salt.as_bytes())
+        );
+        salt
     }
 
     pub fn has_local_permanent_password() -> bool {
@@ -1497,20 +1580,41 @@ impl Config {
             if config.salt.is_empty() {
                 log::warn!("Salt is empty but permanent password is hashed and salt is empty");
             } else {
-                log::error!("Refusing to set salt because permanent password is hashed");
+                log::error!(
+                    "[sundesk-pwdiag] config.rs:set_salt REFUSED: existing_salt_fp={} new_salt_fp={} password_empty_or_plain={}",
+                    Self::diag_fp(config.salt.as_bytes()),
+                    Self::diag_fp(salt.as_bytes()),
+                    password_is_empty_or_not_hashed(&config.password)
+                );
                 return;
             }
         }
+        let old_fp = Self::diag_fp(config.salt.as_bytes());
         config.salt = salt.into();
         config.store();
+        log::warn!(
+            "[sundesk-pwdiag] config.rs:set_salt: old_salt_fp={} new_salt_fp={} new_salt_len={}",
+            old_fp,
+            Self::diag_fp(config.salt.as_bytes()),
+            config.salt.len()
+        );
     }
 
     pub fn get_salt() -> String {
         let config = CONFIG.read().unwrap();
         let mut salt = config.salt.clone();
+        log::warn!(
+            "[sundesk-pwdiag] config.rs:get_salt: stored_salt_len={} stored_salt_fp={}",
+            salt.len(),
+            Self::diag_fp(salt.as_bytes())
+        );
         if salt.is_empty() {
             drop(config);
             salt = Config::get_auto_password(DEFAULT_SALT_LEN);
+            log::warn!(
+                "[sundesk-pwdiag] config.rs:get_salt: stored salt was EMPTY, generated new_salt_fp={}",
+                Self::diag_fp(salt.as_bytes())
+            );
             Config::set_salt(&salt);
         }
         salt
